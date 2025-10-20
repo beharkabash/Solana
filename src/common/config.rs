@@ -39,8 +39,6 @@ impl FromStr for TransactionLandingMode {
     }
 }
 
-use std::str::FromStr;
-
 pub struct Config {
     pub yellowstone_grpc_http: String,
     pub yellowstone_grpc_token: String,
