@@ -1,13 +1,11 @@
 use anyhow::Result;
-use bs58;
 use colored::Colorize;
 use dotenv::dotenv;
 use reqwest::Error;
 use serde::Deserialize;
 use anchor_client::solana_sdk::{commitment_config::CommitmentConfig, signature::Keypair, signer::Signer};
 use tokio::sync::{Mutex, OnceCell};
-use tokio_tungstenite::tungstenite::http::request;
-use std::{env, sync::Arc};
+use std::{env, sync::Arc, str::FromStr};
 use crate::processor::swap::SwapProtocol;
 use crate::{
     common::{constants::INIT_MSG, logger::Logger},

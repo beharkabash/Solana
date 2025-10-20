@@ -309,14 +309,69 @@ class EthereumMonitor:
         return pools
 
     async def get_pool_liquidity(self, pool_address: str, dex_version: int) -> Optional[float]:
-        """Get pool liquidity in USD (simplified)"""
+        """Get pool liquidity in USD"""
         try:
-            # This is a simplified version
-            # Real implementation would query pool reserves and calculate USD value
-            return 100000.0  # Placeholder value
+            checksum_address = self.w3.to_checksum_address(pool_address)
+            
+            # Uniswap V2 style pair contract ABI
+            pair_abi = [
+                {
+                    "constant": True,
+                    "inputs": [],
+                    "name": "getReserves",
+                    "outputs": [
+                        {"name": "reserve0", "type": "uint112"},
+                        {"name": "reserve1", "type": "uint112"},
+                        {"name": "blockTimestampLast", "type": "uint32"}
+                    ],
+                    "type": "function"
+                },
+                {
+                    "constant": True,
+                    "inputs": [],
+                    "name": "token0",
+                    "outputs": [{"name": "", "type": "address"}],
+                    "type": "function"
+                },
+                {
+                    "constant": True,
+                    "inputs": [],
+                    "name": "token1",
+                    "outputs": [{"name": "", "type": "address"}],
+                    "type": "function"
+                }
+            ]
+            
+            pair_contract = self.w3.eth.contract(address=checksum_address, abi=pair_abi)
+            
+            # Get reserves
+            reserves = await pair_contract.functions.getReserves().call()
+            reserve0 = reserves[0] / 1e18
+            reserve1 = reserves[1] / 1e18
+            
+            # Get token addresses
+            token0 = await pair_contract.functions.token0().call()
+            token1 = await pair_contract.functions.token1().call()
+            
+            # WETH address on Ethereum mainnet
+            WETH = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2".lower()
+            
+            # Estimate USD value
+            # If one token is WETH, use ETH price (~$3500)
+            eth_price_usd = 3500.0  # TODO: Get from price oracle like CoinGecko or Chainlink
+            
+            if token0.lower() == WETH:
+                liquidity_usd = reserve0 * eth_price_usd * 2
+            elif token1.lower() == WETH:
+                liquidity_usd = reserve1 * eth_price_usd * 2
+            else:
+                # Estimate based on total reserves (less accurate for non-ETH pairs)
+                liquidity_usd = (reserve0 + reserve1) * 200  # Rough estimate
+            
+            return liquidity_usd if liquidity_usd > 0 else None
 
         except Exception as e:
-            logger.error(f"Error getting pool liquidity: {e}")
+            logger.debug(f"Error getting pool liquidity for {pool_address}: {e}")
             return None
 
     async def monitor(self) -> AsyncGenerator[Dict, None]:

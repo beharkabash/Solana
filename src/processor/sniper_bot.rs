@@ -4012,18 +4012,12 @@ async fn monitor_token_for_selling(
     cancellation_token: CancellationToken,
 ) -> Result<(), String> {
     // Create config for the Yellowstone connection
-    // This is a simplified version of what's in the main copy_trading function
-    let mut yellowstone_grpc_http = "https://helsinki.rpcpool.com/".to_string(); // Default value
-    let mut yellowstone_grpc_token = "your_token_here".to_string(); // Default value
+    // Read from environment variables (required)
+    let yellowstone_grpc_http = std::env::var("YELLOWSTONE_GRPC_HTTP")
+        .map_err(|_| "YELLOWSTONE_GRPC_HTTP environment variable not set".to_string())?;
     
-    // Try to get config values from environment if available
-    if let Ok(url) = std::env::var("YELLOWSTONE_GRPC_HTTP") {
-        yellowstone_grpc_http = url;
-    }
-    
-    if let Ok(token) = std::env::var("YELLOWSTONE_GRPC_TOKEN") {
-        yellowstone_grpc_token = token;
-    }
+    let yellowstone_grpc_token = std::env::var("YELLOWSTONE_GRPC_TOKEN")
+        .map_err(|_| "YELLOWSTONE_GRPC_TOKEN environment variable not set".to_string())?;
     
     logger.log("Connecting to Yellowstone gRPC for selling, will close connection after selling ...".green().to_string());
     

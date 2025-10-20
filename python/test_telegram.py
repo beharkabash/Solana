@@ -6,10 +6,20 @@ Quick test script to verify Telegram bot connection
 import requests
 import json
 import sys
+import os
+from dotenv import load_dotenv
 
-# Your Telegram credentials
-BOT_TOKEN = "7558858258:AAFSRDFIG4Fh15iAehE8bGIg-iWuBblR6SU"
-CHAT_ID = "1507876704"
+# Load environment variables
+load_dotenv()
+
+# Your Telegram credentials from environment
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+if not BOT_TOKEN or not CHAT_ID:
+    print("❌ ERROR: Missing environment variables!")
+    print("Please set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in your .env file")
+    sys.exit(1)
 
 def test_telegram_connection():
     """Test if the Telegram bot can send messages"""

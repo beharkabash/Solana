@@ -297,11 +297,32 @@ class SolanaMonitor:
         return pools
 
     async def get_pool_liquidity(self, pool_address: str) -> Optional[float]:
-        """Get pool liquidity in USD (simplified)"""
+        """Get pool liquidity in USD"""
         try:
-            # This is a simplified version - real implementation would need
-            # to query pool accounts and calculate based on token prices
-            return 50000.0  # Placeholder value
+            from solders.pubkey import Pubkey
+            
+            # Get pool account info
+            pool_pubkey = Pubkey.from_string(pool_address)
+            account_info = await self.client.get_account_info(pool_pubkey)
+            
+            if not account_info or not account_info.value:
+                logger.debug(f"No account info for pool {pool_address}")
+                return None
+            
+            # For Raydium pools, the account data contains reserve information
+            # This is a simplified calculation - assumes SOL is one of the pairs
+            # and estimates based on account balance
+            data = account_info.value.data
+            
+            # Get the SOL balance in the pool (simplified)
+            # Real implementation would parse the pool structure properly
+            sol_balance = account_info.value.lamports / 1e9
+            
+            # Estimate USD value (assuming SOL price ~$150, this should be from price oracle)
+            sol_price_usd = 150.0  # TODO: Get from price oracle
+            estimated_liquidity = sol_balance * sol_price_usd * 2  # *2 for both sides of pair
+            
+            return estimated_liquidity if estimated_liquidity > 0 else None
 
         except Exception as e:
             logger.error(f"Error getting pool liquidity: {e}")

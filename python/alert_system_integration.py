@@ -489,9 +489,26 @@ class TokenMonitor:
 
     async def _get_price_change(self, address: str) -> float:
         """Get actual price change after 24 hours"""
-        # This would fetch real price data
-        # For demo, return simulated value
-        return 2.5  # Placeholder
+        try:
+            # Fetch price data from DexScreener or similar API
+            # This is a simplified implementation
+            
+            # TODO: Implement actual price tracking
+            # Options:
+            # 1. Query DexScreener API for historical price data
+            # 2. Store initial price in database and compare with current
+            # 3. Use CoinGecko/CoinMarketCap APIs
+            
+            # For now, log that this needs implementation
+            logger.debug(f"Price change calculation needed for {address}")
+            
+            # Return 0 to indicate no change data available
+            # Real implementation should track actual price movements
+            return 0.0
+            
+        except Exception as e:
+            logger.error(f"Error getting price change for {address}: {e}")
+            return 0.0
 
     async def run(self):
         """Run the complete monitoring system"""

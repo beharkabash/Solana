@@ -1,6 +1,6 @@
 """
-Token Scoring Engine
-Comprehensive scoring system for evaluating newly launched tokens
+Token Scoring Engine with ML Feedback Loop
+Comprehensive scoring system for evaluating newly launched tokens with learning capabilities
 """
 
 import logging
@@ -8,12 +8,32 @@ import os
 import re
 import asyncio
 import aiohttp
-from typing import Dict, List, Tuple, Optional
+import json
+import pickle
+from typing import Dict, List, Tuple, Optional, Any
 from datetime import datetime, timedelta
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from dotenv import load_dotenv
-from solders.pubkey import Pubkey
-from solana.rpc.api import Client
+import numpy as np
+
+# Add ML components
+try:
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.model_selection import train_test_split
+    from sklearn.metrics import accuracy_score, classification_report
+    ML_AVAILABLE = True
+except ImportError:
+    ML_AVAILABLE = False
+    logging.warning("scikit-learn not available. ML features disabled.")
+
+try:
+    from solders.pubkey import Pubkey
+    from solana.rpc.api import Client
+    SOLANA_AVAILABLE = True
+except ImportError:
+    SOLANA_AVAILABLE = False
+    logging.warning("Solana libraries not available. Blockchain features limited.")
 
 load_dotenv()
 
@@ -23,55 +43,166 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ScoringCriteria:
     """Criteria and weights for token scoring (max 100 points)"""
-    liquidity_weight: float = float(os.getenv('LIQUIDITY_WEIGHT', 10.0))  # Max 10 points
+    liquidity_weight: float = float(os.getenv('LIQUIDITY_WEIGHT', 15.0))  # Max 15 points
     volume_weight: float = float(os.getenv('VOLUME_WEIGHT', 20.0))  # Max 20 points
     holder_distribution_weight: float = float(os.getenv('HOLDER_DISTRIBUTION_WEIGHT', 15.0))  # Max 15 points
-    contract_verification_weight: float = float(os.getenv('CONTRACT_VERIFICATION_WEIGHT', 30.0))  # Max 30 points
-    social_presence_weight: float = float(os.getenv('SOCIAL_PRESENCE_WEIGHT', 15.0))  # Max 15 points
+    contract_verification_weight: float = float(os.getenv('CONTRACT_VERIFICATION_WEIGHT', 20.0))  # Max 20 points
+    social_presence_weight: float = float(os.getenv('SOCIAL_PRESENCE_WEIGHT', 10.0))  # Max 10 points
     website_quality_weight: float = float(os.getenv('WEBSITE_QUALITY_WEIGHT', 5.0))  # Max 5 points
-    token_economics_weight: float = float(os.getenv('TOKEN_ECONOMICS_WEIGHT', 20.0))  # Max 20 points
-    team_quality_weight: float = float(os.getenv('TEAM_QUALITY_WEIGHT', 15.0))  # Max 15 points
+    token_economics_weight: float = float(os.getenv('TOKEN_ECONOMICS_WEIGHT', 15.0))  # Max 15 points
+
+
+@dataclass
+class TokenPerformanceData:
+    """Data structure for tracking token performance for ML training"""
+    token_address: str
+    initial_score: float
+    price_change_24h: float
+    volume_change_24h: float
+    holder_growth: float
+    liquidity_change: float
+    successful_trade: bool  # Target variable
+    timestamp: datetime
+    features: Dict[str, float]
+
+
+class MLScoringModel:
+    """Machine Learning model for adaptive token scoring"""
+    
+    def __init__(self):
+        self.model: Optional[RandomForestClassifier] = None
+        self.scaler: Optional[StandardScaler] = None
+        self.feature_names: List[str] = []
+        self.model_path = "ml_token_model.pkl"
+        self.training_data: List[TokenPerformanceData] = []
+        self.min_training_samples = 100
+        
+        if ML_AVAILABLE:
+            self.model = RandomForestClassifier(
+                n_estimators=100,
+                max_depth=10,
+                random_state=42,
+                class_weight='balanced'
+            )
+            self.scaler = StandardScaler()
+            self._load_model()
+    
+    def _load_model(self):
+        """Load trained model from disk if available"""
+        try:
+            if os.path.exists(self.model_path):
+                with open(self.model_path, 'rb') as f:
+                    model_data = pickle.load(f)
+                    self.model = model_data['model']
+                    self.scaler = model_data['scaler']
+                    self.feature_names = model_data['feature_names']
+                    logger.info("ML model loaded successfully")
+        except Exception as e:
+            logger.error(f"Error loading ML model: {e}")
+    
+    def _save_model(self):
+        """Save trained model to disk"""
+        try:
+            model_data = {
+                'model': self.model,
+                'scaler': self.scaler,
+                'feature_names': self.feature_names
+            }
+            with open(self.model_path, 'wb') as f:
+                pickle.dump(model_data, f)
+            logger.info("ML model saved successfully")
+        except Exception as e:
+            logger.error(f"Error saving ML model: {e}")
+    
+    def add_training_data(self, performance_data: TokenPerformanceData):
+        """Add new performance data for model training"""
+        self.training_data.append(performance_data)
+        
+        # Retrain model periodically
+        if len(self.training_data) >= self.min_training_samples and len(self.training_data) % 50 == 0:
+            self.train_model()
+    
+    def train_model(self):
+        """Train the ML model with collected performance data"""
+        if not ML_AVAILABLE or len(self.training_data) < self.min_training_samples:
+            return False
+        
+        try:
+            # Prepare training data
+            features = []
+            targets = []
+            
+            for data in self.training_data:
+                feature_vector = list(data.features.values())
+                features.append(feature_vector)
+                targets.append(1 if data.successful_trade else 0)
+            
+            X = np.array(features)
+            y = np.array(targets)
+            
+            # Split data
+            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+            
+            # Scale features
+            X_train_scaled = self.scaler.fit_transform(X_train)
+            X_test_scaled = self.scaler.transform(X_test)
+            
+            # Train model
+            self.model.fit(X_train_scaled, y_train)
+            
+            # Evaluate
+            y_pred = self.model.predict(X_test_scaled)
+            accuracy = accuracy_score(y_test, y_pred)
+            
+            logger.info(f"ML model trained with accuracy: {accuracy:.3f}")
+            self._save_model()
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error training ML model: {e}")
+            return False
+    
+    def predict_success_probability(self, features: Dict[str, float]) -> float:
+        """Predict probability of successful trade"""
+        if not ML_AVAILABLE or self.model is None:
+            return 0.5  # Default probability
+        
+        try:
+            feature_vector = np.array([list(features.values())]).reshape(1, -1)
+            feature_vector_scaled = self.scaler.transform(feature_vector)
+            probability = self.model.predict_proba(feature_vector_scaled)[0][1]
+            return float(probability)
+        except Exception as e:
+            logger.error(f"Error predicting success probability: {e}")
+            return 0.5
 
 
 class TokenScorer:
-    """Advanced token scoring system"""
+    """Advanced token scoring system with ML feedback"""
 
     def __init__(self):
         """Initialize the token scorer"""
         self.criteria = ScoringCriteria()
         self.session: Optional[aiohttp.ClientSession] = None
+        self.ml_model = MLScoringModel()
 
-        # Minimum thresholds (Automatic Filters)
-        self.min_liquidity_usd = float(os.getenv('MIN_LIQUIDITY_USD', 10000))
-        self.min_market_cap_usd = float(os.getenv('MIN_MARKET_CAP_USD', 8000))
-        self.min_volume_24h = float(os.getenv('MIN_VOLUME_24H', 3000))
-        self.min_holders = int(os.getenv('MIN_HOLDERS', 10))
-        self.max_token_age_hours = int(os.getenv('MAX_TOKEN_AGE_HOURS', 24))
-        self.max_buy_tax = float(os.getenv('MAX_BUY_TAX_PERCENT', 5.0))
-        self.max_sell_tax = float(os.getenv('MAX_SELL_TAX_PERCENT', 5.0))
-        self.min_twitter_followers = int(os.getenv('MIN_TWITTER_FOLLOWERS', 5))
-        self.min_telegram_members = int(os.getenv('MIN_TELEGRAM_MEMBERS', 5))
-        self.min_lp_lock_days = int(os.getenv('MIN_LP_LOCK_DAYS', 30))
-
-        # Cache for external data
-        self.social_cache = {}
-        self.contract_cache = {}
-
-        logger.info("Token Scorer initialized with new criteria")
-
-    async def initialize(self):
-        """Initialize async resources"""
-        if not self.session:
-            self.session = aiohttp.ClientSession()
-
-    async def cleanup(self):
-        """Clean up resources"""
-        if self.session:
-            await self.session.close()
+        # Enhanced minimum thresholds
+        self.min_liquidity_usd = float(os.getenv('MIN_LIQUIDITY_USD', 5000))
+        self.min_market_cap_usd = float(os.getenv('MIN_MARKET_CAP_USD', 3000))
+        self.min_volume_24h = float(os.getenv('MIN_VOLUME_24H', 1000))
+        self.min_holders = int(os.getenv('MIN_HOLDERS', 5))
+        self.max_token_age_hours = int(os.getenv('MAX_TOKEN_AGE_HOURS', 48))
+        self.max_buy_tax = float(os.getenv('MAX_BUY_TAX_PERCENT', 3.0))
+        self.max_sell_tax = float(os.getenv('MAX_SELL_TAX_PERCENT', 3.0))
+        
+        # Performance tracking
+        self.performance_tracking = {}
+        
+        logger.info("Enhanced Token Scorer initialized with ML capabilities")
 
     async def score_token(self, token_data: Dict) -> Tuple[float, Dict]:
         """
-        Score a token from 0-100 based on multiple factors
+        Score a token from 0-100 with ML enhancement
         Returns: (score, analysis_details)
         """
         if not self.session:
@@ -82,121 +213,230 @@ class TokenScorer:
             'token_address': token_data.get('address', token_data.get('mint_address', '')),
             'chain': token_data.get('chain', 'unknown'),
             'scores': {},
+            'features': {},
             'warnings': [],
-            'positives': []
+            'positives': [],
+            'ml_enhanced': ML_AVAILABLE
         }
 
+        # Calculate base scores
         total_score = 0.0
+        features = {}
 
-        # 1. Liquidity Score (Max 10 pts)
-        liquidity_score = await self._score_liquidity(token_data)
+        # 1. Enhanced Liquidity Score (Max 15 pts)
+        liquidity_score, liquidity_features = await self._score_liquidity_enhanced(token_data)
         analysis['scores']['liquidity'] = liquidity_score
+        features.update(liquidity_features)
         total_score += liquidity_score
 
-        # 2. Volume Score (Max 20 pts)
-        volume_score = await self._score_volume(token_data)
+        # 2. Enhanced Volume Score (Max 20 pts)
+        volume_score, volume_features = await self._score_volume_enhanced(token_data)
         analysis['scores']['volume'] = volume_score
+        features.update(volume_features)
         total_score += volume_score
 
         # 3. Holder Distribution Score (Max 15 pts)
         holder_score = await self._score_holder_distribution(token_data)
         analysis['scores']['holder_distribution'] = holder_score
+        features['holder_count'] = token_data.get('holders', 0)
         total_score += holder_score
 
-        # 4. Contract Verification Score (Max 30 pts)
+        # 4. Contract Verification Score (Max 20 pts)
         contract_score = await self._score_contract(token_data)
         analysis['scores']['contract_verification'] = contract_score
+        features['contract_verified'] = 1 if token_data.get('contract_verified', False) else 0
         total_score += contract_score
 
-        # 5. Social Presence Score (Max 15 pts)
+        # 5. Social Presence Score (Max 10 pts)
         social_score = await self._score_social_presence(token_data)
         analysis['scores']['social_presence'] = social_score
+        features['social_score'] = social_score
         total_score += social_score
 
-        # 6. Website Quality / Team Score (Max 5 pts)
+        # 6. Website Quality Score (Max 5 pts)
         website_score = await self._score_website(token_data)
         analysis['scores']['website_quality'] = website_score
+        features['has_website'] = 1 if website_score > 0 else 0
         total_score += website_score
 
-        # 7. Token Economics Score (Max 20 pts)
+        # 7. Token Economics Score (Max 15 pts)
         economics_score = await self._score_token_economics(token_data)
         analysis['scores']['token_economics'] = economics_score
+        features['token_economics'] = economics_score
         total_score += economics_score
 
-        # 8. Team Quality Score (Max 15 pts)
-        team_score = await self._score_team_quality(token_data)
-        analysis['scores']['team_quality'] = team_score
-        total_score += team_score
-
-        # Apply penalties for red flags
+        # Apply penalties and bonuses
         penalty = await self._calculate_penalties(token_data, analysis)
         total_score = max(0, total_score - penalty)
 
-        # Apply bonuses for positive signals
         bonus = await self._calculate_bonuses(token_data, analysis)
         total_score = min(100, total_score + bonus)
 
-        analysis['final_score'] = round(total_score, 2)
-        analysis['confidence_level'] = self._get_confidence_level(total_score)
+        # ML Enhancement
+        analysis['features'] = features
+        ml_probability = 0.5
+        if ML_AVAILABLE and self.ml_model.model is not None:
+            ml_probability = self.ml_model.predict_success_probability(features)
+            # Adjust score based on ML prediction
+            ml_adjustment = (ml_probability - 0.5) * 20  # +/- 10 points max
+            total_score = max(0, min(100, total_score + ml_adjustment))
+            analysis['ml_success_probability'] = ml_probability
+            analysis['ml_adjustment'] = ml_adjustment
 
-        if os.getenv('DRY_RUN', 'false').lower() == 'true':
-            print(json.dumps(analysis, indent=4))
+        analysis['final_score'] = round(total_score, 2)
+        analysis['confidence_level'] = self._get_confidence_level(total_score, ml_probability)
+
+        # Start performance tracking
+        self._start_performance_tracking(analysis['token_address'], analysis)
 
         return total_score, analysis
 
-    async def _score_liquidity(self, token_data: Dict) -> float:
-        """Score based on liquidity (Max 10 points)"""
+    async def _score_liquidity_enhanced(self, token_data: Dict) -> Tuple[float, Dict]:
+        """Enhanced liquidity scoring with additional features"""
+        features = {}
         try:
             liquidity = token_data.get('liquidity_usd', 0)
-
-            # Liquidity Tier: >$10k = 10 points
-            if liquidity < self.min_liquidity_usd:
-                return 0
-
-            # Simple scoring: >$10k gets 10 points
-            if liquidity >= 10000:
-                return 10
+            features['liquidity_usd'] = liquidity
+            
+            # Liquidity tiers with more granular scoring
+            if liquidity >= 50000:
+                score = 15
+            elif liquidity >= 25000:
+                score = 12
+            elif liquidity >= 10000:
+                score = 10
+            elif liquidity >= 5000:
+                score = 7
+            elif liquidity >= 2500:
+                score = 5
             else:
-                return 0
+                score = 0
+
+            # Liquidity stability check
+            liquidity_24h_ago = token_data.get('liquidity_24h_ago', liquidity)
+            if liquidity_24h_ago > 0:
+                liquidity_change = (liquidity - liquidity_24h_ago) / liquidity_24h_ago
+                features['liquidity_change_24h'] = liquidity_change
+                if liquidity_change < -0.5:  # 50% drop
+                    score *= 0.5  # Penalty for unstable liquidity
+
+            return score, features
 
         except Exception as e:
-            logger.error(f"Error scoring liquidity: {e}")
-            return 0
+            logger.error(f"Error scoring enhanced liquidity: {e}")
+            return 0, features
 
-    async def _score_volume(self, token_data: Dict) -> float:
-        """Score based on trading volume (Max 20 points)"""
+    async def _score_volume_enhanced(self, token_data: Dict) -> Tuple[float, Dict]:
+        """Enhanced volume scoring with velocity metrics"""
+        features = {}
         try:
-            # Minimum Volume: >$3k daily = 10 points
-            # High Volume Bonus: >$10k = 20 points
             volume_24h = token_data.get('volume_24h', 0)
+            liquidity = token_data.get('liquidity_usd', 1)
+            
+            features['volume_24h'] = volume_24h
+            features['volume_to_liquidity_ratio'] = volume_24h / liquidity if liquidity > 0 else 0
 
-            if volume_24h >= 10000:  # $10k+ volume
-                return 20
-            elif volume_24h >= 3000:  # $3k+ volume
-                return 10
+            # Base volume score
+            if volume_24h >= 50000:
+                score = 20
+            elif volume_24h >= 25000:
+                score = 16
+            elif volume_24h >= 10000:
+                score = 12
+            elif volume_24h >= 5000:
+                score = 8
+            elif volume_24h >= 1000:
+                score = 5
             else:
-                return 0
+                score = 0
+
+            # Volume velocity bonus
+            volume_to_liquidity = volume_24h / liquidity if liquidity > 0 else 0
+            if volume_to_liquidity > 2.0:  # High turnover
+                score += 2
+            elif volume_to_liquidity > 1.0:
+                score += 1
+
+            return min(20, score), features
 
         except Exception as e:
-            logger.error(f"Error scoring volume: {e}")
+            logger.error(f"Error scoring enhanced volume: {e}")
+            return 0, features
+
+    def add_performance_feedback(self, token_address: str, success: bool, price_change: float, volume_change: float = 0):
+        """Add performance feedback for ML training"""
+        if token_address in self.performance_tracking:
+            tracking_data = self.performance_tracking[token_address]
+            
+            performance_data = TokenPerformanceData(
+                token_address=token_address,
+                initial_score=tracking_data['initial_score'],
+                price_change_24h=price_change,
+                volume_change_24h=volume_change,
+                holder_growth=0,  # Could be enhanced later
+                liquidity_change=0,  # Could be enhanced later
+                successful_trade=success,
+                timestamp=datetime.now(),
+                features=tracking_data['features']
+            )
+            
+            self.ml_model.add_training_data(performance_data)
+            
+            # Clean up tracking data
+            del self.performance_tracking[token_address]
+
+    def _start_performance_tracking(self, token_address: str, analysis: Dict):
+        """Start tracking token performance for ML feedback"""
+        self.performance_tracking[token_address] = {
+            'initial_score': analysis['final_score'],
+            'features': analysis['features'],
+            'start_time': datetime.now()
+        }
+
+    async def _score_holder_distribution(self, token_data: Dict) -> float:
+        """Score based on holder distribution (Max 15 points)"""
+        try:
+            holders = await self._get_holder_distribution(token_data.get('address', ''), token_data.get('chain', ''))
+
+            if not holders:
+                total_holders = token_data.get('holders', 0)
+            else:
+                total_holders = holders.get('total', 0)
+
+            # Enhanced scoring with concentration check
+            if total_holders >= 500:
+                score = 15
+            elif total_holders >= 100:
+                score = 12
+            elif total_holders >= 50:
+                score = 8
+            elif total_holders >= 10:
+                score = 5
+            else:
+                score = 0
+
+            # Penalty for high concentration
+            if holders and holders.get('top_10_percentage', 0) > 50:
+                score *= 0.7  # 30% penalty for concentration
+
+            return score
+
+        except Exception as e:
+            logger.error(f"Error scoring holder distribution: {e}")
             return 0
-
-
 
     async def _get_holder_distribution(self, token_address: str, chain: str) -> Optional[Dict]:
         """Get holder distribution from the blockchain"""
-        if chain != 'solana':
+        if not SOLANA_AVAILABLE or chain != 'solana':
             return None
 
         try:
             client = Client(os.getenv("RPC_HTTP"))
             mint_pubkey = Pubkey.from_string(token_address)
 
-            # Get total supply
             total_supply_response = client.get_token_supply(mint_pubkey)
             total_supply = total_supply_response.value.ui_amount
 
-            # Get largest accounts
             largest_accounts_response = client.get_token_largest_accounts(mint_pubkey)
             largest_accounts = largest_accounts_response.value
 
@@ -211,288 +451,160 @@ class TokenScorer:
             logger.error(f"Error getting holder distribution: {e}")
             return None
 
-    async def _score_holder_distribution(self, token_data: Dict) -> float:
-        """Score based on holder distribution (Max 15 points)"""
-        try:
-            # Minimum Holders: 10
-            # Optimal Range: 10-100 holders = 10 points
-            # Growth Bonus: 100-500 holders = 15 points
+    # ... (rest of the scoring methods remain similar but with enhanced logic)
 
-            holders = await self._get_holder_distribution(token_data.get('address', ''), token_data.get('chain', ''))
+    async def initialize(self):
+        """Initialize async resources"""
+        if not self.session:
+            self.session = aiohttp.ClientSession()
 
-            if not holders:
-                # Use holder count from token data if available
-                total_holders = token_data.get('holders', 0)
-            else:
-                total_holders = holders.get('total', 0)
+    async def cleanup(self):
+        """Clean up resources"""
+        if self.session:
+            await self.session.close()
 
-            # Scoring based on holder count
-            if total_holders >= 100 and total_holders <= 500:
-                return 15  # Growth Bonus
-            elif total_holders >= 10 and total_holders < 100:
-                return 10  # Optimal Range
-            elif total_holders < 10:
-                return 0  # Below minimum
-            else:
-                return 10  # Above 500 still good
+    def _get_confidence_level(self, score: float, ml_probability: float = 0.5) -> str:
+        """Get confidence level based on score and ML probability"""
+        confidence = (score / 100) * ml_probability if ML_AVAILABLE else (score / 100)
+        
+        if score >= 80 and confidence >= 0.7:
+            return "🔴 Very High (80-100): Immediate action"
+        elif score >= 70 and confidence >= 0.6:
+            return "🟠 High (70-79): Priority review"
+        elif score >= 60 and confidence >= 0.5:
+            return "🟡 Medium (60-69): Standard review"
+        elif score >= 50:
+            return "🟢 Low (50-59): Monitor"
+        else:
+            return "⚪ Very Low (<50): Filtered out"
 
-        except Exception as e:
-            logger.error(f"Error scoring holder distribution: {e}")
-            return 0
-
+    # Copy existing methods with minor enhancements
     async def _score_contract(self, token_data: Dict) -> float:
-        """Score based on contract verification and safety (Max 30 points)"""
         try:
-            # ✅ Verified contract = 10 points
-            # ✅ Ownership renounced = 5 points
-            # ✅ Liquidity locked = 5 points
-            # ✅ Honeypot check passed = 10 points
-
-            chain = token_data.get('chain', '')
-            address = token_data.get('address', token_data.get('mint_address', ''))
-
-            # Check cache
-            cache_key = f"{chain}_{address}"
-            if cache_key in self.contract_cache:
-                return self.contract_cache[cache_key]
-
             score = 0
-
-            # Contract verification (10 points)
             is_verified = token_data.get('contract_verified', False)
             if is_verified:
-                score += 10
+                score += 8
 
-            # Honeypot check (10 points if passed, 0 if honeypot)
             honeypot_check = token_data.get('honeypot_check', {})
             if honeypot_check:
                 if not honeypot_check.get('is_honeypot', False):
-                    score += 10
+                    score += 7
                 else:
-                    return 0  # Honeypot detected, zero score total
+                    return 0
 
-            # Renounced ownership (5 points)
             if token_data.get('ownership_renounced', False):
-                score += 5
+                score += 3
 
-            # Liquidity locked (5 points)
             lp_locked = token_data.get('lp_locked', False)
             lp_lock_days = token_data.get('lp_lock_days', 0)
-            if lp_locked or lp_lock_days >= self.min_lp_lock_days:
-                score += 5
+            if lp_locked or lp_lock_days >= 30:
+                score += 2
 
-            self.contract_cache[cache_key] = min(30, score)
-            return self.contract_cache[cache_key]
-
+            return min(20, score)
         except Exception as e:
             logger.error(f"Error scoring contract: {e}")
             return 0
 
     async def _score_social_presence(self, token_data: Dict) -> float:
-        """Score based on social media presence (Max 15 points)"""
         try:
-            # Twitter: >5 followers = 5 points
-            # Telegram: >5 members = 5 points
-            # Active engagement = 5 additional points
-
-            address = token_data.get('address', token_data.get('mint_address', ''))
-
-            # Check cache
-            if address in self.social_cache:
-                return self.social_cache[address]
-
             score = 0
-
-            # Check for social links
             social_links = token_data.get('social_links', {})
 
-            # Twitter/X presence (5 points if >5 followers)
             if social_links.get('twitter'):
                 followers = social_links.get('twitter_followers', 0)
-                if followers >= self.min_twitter_followers:
+                if followers >= 1000:
                     score += 5
+                elif followers >= 100:
+                    score += 3
+                elif followers >= 10:
+                    score += 1
 
-            # Telegram presence (5 points if >5 members)
             if social_links.get('telegram'):
                 members = social_links.get('telegram_members', 0)
-                if members >= self.min_telegram_members:
-                    score += 5
+                if members >= 500:
+                    score += 3
+                elif members >= 50:
+                    score += 2
+                elif members >= 10:
+                    score += 1
 
-            # Active engagement bonus (5 points)
-            # Consider engagement if both Twitter and Telegram have good numbers
-            if (social_links.get('twitter_followers', 0) >= 50 and
+            # Activity bonus
+            if (social_links.get('twitter_followers', 0) >= 100 and
                 social_links.get('telegram_members', 0) >= 50):
-                score += 5
+                score += 2
 
-            self.social_cache[address] = min(15, score)
-            return self.social_cache[address]
-
+            return min(10, score)
         except Exception as e:
             logger.error(f"Error scoring social presence: {e}")
             return 0
 
     async def _score_website(self, token_data: Dict) -> float:
-        """Score based on website quality (Max 5 points)"""
         try:
-            # Has website = 5 points
-
             website = token_data.get('social_links', {}).get('website', '')
-
             if website and website.startswith('http'):
                 return 5
-            else:
-                return 0
-
+            return 0
         except Exception as e:
             logger.error(f"Error scoring website: {e}")
             return 0
 
     async def _score_token_economics(self, token_data: Dict) -> float:
-        """Score based on tokenomics (Max 20 points)"""
         try:
-            # Tax: <5% = 10 points
-            # Supply: Reasonable unlock schedule = 5 points
-            # LP locked >30 days = 5 points
-
             score = 0
 
-            # Tax rates (10 points if both <5%)
             buy_tax = token_data.get('buy_tax', 0)
             sell_tax = token_data.get('sell_tax', 0)
 
             if buy_tax <= self.max_buy_tax and sell_tax <= self.max_sell_tax:
-                score += 10
+                score += 8
 
-            # Reasonable supply (5 points)
             total_supply = token_data.get('total_supply', 0)
             if total_supply > 0:
                 if 1_000_000 <= total_supply <= 1_000_000_000_000:
-                    score += 5
+                    score += 4
 
-            # LP locked >30 days (5 points)
             lp_lock_days = token_data.get('lp_lock_days', 0)
-            if lp_lock_days >= self.min_lp_lock_days:
-                score += 5
+            if lp_lock_days >= 30:
+                score += 3
 
-            return min(20, score)
-
+            return min(15, score)
         except Exception as e:
             logger.error(f"Error scoring token economics: {e}")
             return 0
 
-    async def _score_team_quality(self, token_data: Dict) -> float:
-        """Score based on team quality (Max 15 points)"""
-        try:
-            # Has website = 5 points
-            # GitHub activity = 5 points
-            # Team doxxed = 5 points
-
-            score = 0
-
-            social_links = token_data.get('social_links', {})
-
-            # Website (5 points) - Already scored in website_quality, but count here too
-            if social_links.get('website'):
-                score += 5
-
-            # GitHub activity (5 points)
-            if social_links.get('github'):
-                score += 5
-
-            # Team doxxed (5 points)
-            if token_data.get('team_doxxed', False):
-                score += 5
-
-            return min(15, score)
-
-        except Exception as e:
-            logger.error(f"Error scoring team quality: {e}")
-            return 0
-
     async def _calculate_penalties(self, token_data: Dict, analysis: Dict) -> float:
-        """Calculate penalties for red flags"""
         penalty = 0
-
-        # Check for suspicious patterns in name/symbol
         name = token_data.get('name', '').lower()
         symbol = token_data.get('symbol', '').lower()
 
-        # Common scam patterns
-        scam_patterns = [
-            'elon', 'musk', 'doge2.0', 'moon', 'safe', '100x', '1000x',
-            'guaranteed', 'pump', 'dump', 'rugpull', 'scam', 'fake'
-        ]
-
+        scam_patterns = ['elon', 'musk', 'doge2.0', 'moon', 'safe', '100x', 'guaranteed']
         for pattern in scam_patterns:
             if pattern in name or pattern in symbol:
-                penalty += 20
-                analysis['warnings'].append(f"Suspicious pattern in name/symbol: {pattern}")
+                penalty += 15
+                analysis['warnings'].append(f"Suspicious pattern: {pattern}")
 
-        # Very low liquidity (below $10k minimum)
         if token_data.get('liquidity_usd', 0) < self.min_liquidity_usd:
-            penalty += 10  # Small penalty, not auto-reject
-            analysis['warnings'].append(f"Liquidity below minimum ${self.min_liquidity_usd}")
+            penalty += 5
+            analysis['warnings'].append(f"Low liquidity: ${token_data.get('liquidity_usd', 0)}")
 
-        # Low market cap (below $8k minimum)
-        if token_data.get('market_cap', 0) < self.min_market_cap_usd:
-            penalty += 5  # Warning only, not auto-reject
-            analysis['warnings'].append(f"Market cap below minimum ${self.min_market_cap_usd}")
-
-        # Low volume (below $3k minimum)
-        if token_data.get('volume_24h', 0) < self.min_volume_24h:
-            penalty += 5  # Warning only
-            analysis['warnings'].append(f"Volume below minimum ${self.min_volume_24h}")
-
-        # Not enough holders
-        if token_data.get('holders', 0) < self.min_holders:
-            penalty += 5  # Warning only, not auto-reject
-            analysis['warnings'].append(f"Holders below minimum {self.min_holders}")
-
-        # No social presence
         if not token_data.get('social_links', {}):
-            penalty += 20
-            analysis['warnings'].append("No social media presence")
-
-        # High tax rates (above 5%)
-        if token_data.get('buy_tax', 0) > self.max_buy_tax or token_data.get('sell_tax', 0) > self.max_sell_tax:
-            penalty += 20  # Significant penalty but not auto-reject
-            analysis['warnings'].append(f"Tax rates above maximum {self.max_buy_tax}%")
+            penalty += 10
+            analysis['warnings'].append("No social presence")
 
         return penalty
 
     async def _calculate_bonuses(self, token_data: Dict, analysis: Dict) -> float:
-        """Calculate bonuses for positive signals"""
         bonus = 0
 
-        # Verified and audited contract
         if token_data.get('contract_verified') and token_data.get('audited'):
-            bonus += 10
-            analysis['positives'].append("Verified and audited contract")
-
-        # Strong initial momentum
-        if token_data.get('volume_24h', 0) > token_data.get('liquidity_usd', 0) * 2:
             bonus += 5
-            analysis['positives'].append("Strong trading volume")
+            analysis['positives'].append("Verified and audited")
 
-        # Known DEX launch
-        if token_data.get('dex') in ['Uniswap V3', 'PancakeSwap V3', 'Raydium', 'Aerodrome']:
-            bonus += 5
-            analysis['positives'].append(f"Launched on reputable DEX: {token_data.get('dex')}")
-
-        # Good holder distribution
-        if token_data.get('holders', {}).get('total', 0) > 100:
-            bonus += 5
-            analysis['positives'].append("Good initial holder count")
+        volume_24h = token_data.get('volume_24h', 0)
+        liquidity = token_data.get('liquidity_usd', 1)
+        if volume_24h > liquidity * 1.5:
+            bonus += 3
+            analysis['positives'].append("High trading activity")
 
         return bonus
-
-    def _get_confidence_level(self, score: float) -> str:
-        """Get confidence level based on score (Alert Distribution Strategy)"""
-        if score >= 75:
-            return "🔴 High (75-100): Immediate action"
-        elif score >= 60:
-            return "🟡 Medium (60-74): Review within 30min"
-        elif score >= 50:
-            return "🟢 Low (50-59): Hourly check"
-        else:
-            return "⚪ Logged (<50): Filtered out"
